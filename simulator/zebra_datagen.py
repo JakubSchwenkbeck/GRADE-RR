@@ -161,6 +161,13 @@ try:
 	args, unknown = parser.parse_known_args()
 	cli_argv = set(sys.argv[1:])
 
+	if args.config_file and not os.path.isabs(args.config_file):
+		candidate = os.path.abspath(args.config_file)
+		if not os.path.exists(candidate):
+			candidate = os.path.abspath(os.path.join(simulator_dir, "configs", args.config_file))
+		if os.path.exists(candidate):
+			args.config_file = candidate
+
 	config = confuse.Configuration("DynamicWorlds", __name__)
 	config.set_file(args.config_file)
 	# Avoid overriding file values with parser defaults when a flag was not explicitly passed.
@@ -171,6 +178,33 @@ try:
 		except Exception:
 			pass
 	config.set_args(args)
+
+	repo_root = os.path.abspath(os.path.join(simulator_dir, os.pardir))
+
+	def _resolve_config_path(key):
+		try:
+			value = config[key].get()
+		except Exception:
+			return
+		if not isinstance(value, str) or value == "":
+			return
+		if value.startswith("omniverse://") or value.startswith("http://") or value.startswith("https://"):
+			return
+		if os.path.isabs(value):
+			return
+		resolved = os.path.abspath(os.path.join(repo_root, value))
+		config[key].set(resolved)
+
+	for _key in (
+		"env_path",
+		"base_env_path",
+		"zebra_anims_loc",
+		"robot_mesh_path",
+		"usd_robot_path",
+		"out_folder",
+		"out_folder_npy",
+	):
+		_resolve_config_path(_key)
 	can_start = True
 	interactive_preview_mode = args.mode == "roam"
 	preview_settings_rate = 60 if interactive_preview_mode else config["physics_hz"].get()
@@ -261,7 +295,10 @@ try:
 	                    "Landscape_2", "Ground", "Ground", "Landscape_1", "Landscape_0", "Landscape_1"]
 
 	need_sky = [True] * len(all_env_names)
-	fix_env_value = config["fix_env"].get()
+	try:
+		fix_env_value = config["fix_env"].get()
+	except Exception:
+		fix_env_value = ""
 	if fix_env_value and fix_env_value in all_env_names:
 		env_id = all_env_names.index(fix_env_value)
 	else:
