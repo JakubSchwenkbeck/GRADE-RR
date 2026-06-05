@@ -88,14 +88,24 @@ def add_semantics(prim: Prim, semantic_label: str):
 	semantic_label: the semantic label to add
 	"""
 	try:
-		if not prim.HasAPI(Semantics.SemanticsAPI):
-			sem = Semantics.SemanticsAPI.Apply(prim, "Semantics")
-			sem.CreateSemanticTypeAttr()
-			sem.CreateSemanticDataAttr()
+		if hasattr(Semantics, "SemanticsLabelsAPI"):
+			if not prim.HasAPI(Semantics.SemanticsLabelsAPI):
+				sem = Semantics.SemanticsLabelsAPI.Apply(prim)
+			else:
+				sem = Semantics.SemanticsLabelsAPI.Get(prim)
+			if hasattr(sem, "CreateSemanticLabelsAttr"):
+				sem.CreateSemanticLabelsAttr().Set([str(semantic_label)])
+			else:
+				sem.GetSemanticLabelsAttr().Set([str(semantic_label)])
 		else:
-			sem = Semantics.SemanticsAPI.Get(prim, "Semantics")
-		sem.GetSemanticTypeAttr().Set("class")
-		sem.GetSemanticDataAttr().Set(str(semantic_label))
+			if not prim.HasAPI(Semantics.SemanticsAPI):
+				sem = Semantics.SemanticsAPI.Apply(prim, "Semantics")
+				sem.CreateSemanticTypeAttr()
+				sem.CreateSemanticDataAttr()
+			else:
+				sem = Semantics.SemanticsAPI.Get(prim, "Semantics")
+			sem.GetSemanticTypeAttr().Set("class")
+			sem.GetSemanticDataAttr().Set(str(semantic_label))
 	except Exception:
 		# Some legacy assets contain malformed semantic attrs (empty typeName).
 		# Skip semantic tagging for those prims to keep simulation running.
