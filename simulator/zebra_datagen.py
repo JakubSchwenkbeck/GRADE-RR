@@ -56,7 +56,6 @@ def boolean_string(s):
 		raise ValueError('Not a valid boolean string')
 	return s.lower() == 'true'
 
-
 def compute_points(skel_root_path, prim, ef, stage):
 	usdSkelRoot = UsdSkel.Root.Get(stage, skel_root_path)
 	UsdSkel.BakeSkinning(usdSkelRoot, Gf.Interval(0, ef))
@@ -223,6 +222,44 @@ try:
 	import carb
 	import omni
 	import omni.client
+
+
+
+	from omni.replicator.core import AnnotatorRegistry, BackendDispatch, Writer, WriterRegistry
+    
+	class ZebraDatasetWriter(Writer):
+		def __init__(self, output_dir, out_dir_npy):
+			super().__init__()  # Initialize the underlying Replicator base writer class
+			self.version = "1.0.0"
+			self.backend = BackendDispatch({"paths": {"out_dir": output_dir}})
+			self.out_dir_npy = out_dir_npy
+            
+            # Explicitly request the RGB annotator
+			self.annotators.append(AnnotatorRegistry.get_annotator("rgb"))
+			self._frame_id = 0
+			self.current_frame_info = {} 
+
+		def write(self, data: dict):
+            # 1. Let Replicator write the RGB PNG files natively
+			for annotator in data.keys():
+				if annotator.startswith("rgb"):
+					filename = f"rgb_{self._frame_id}.png"
+					self.backend.write_image(filename, data[annotator])
+
+            # 2. Save your custom tracking matrix alongside it
+			if self.current_frame_info:
+				step = self.current_frame_info.get("step", self._frame_id)
+				substep = self.current_frame_info.get("substep", 0)
+				np.save(os.path.join(self.out_dir_npy, f"frame_{step}_{substep}.npy"), self.current_frame_info)
+
+			self._frame_id += 1
+
+    # Register it with the Omni Replicator engine
+	WriterRegistry.register(ZebraDatasetWriter)
+
+
+
+
 	if config["headless"].get():
 		_patch_property_window_for_headless()
 	cloud_path = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1"
@@ -287,7 +324,7 @@ try:
 
 	# Defer extension setup until after stage load to avoid loader-time instability.
 	# (Some optional extensions can interfere with stage reopen/load in Isaac Sim 5.1.)
-	deferred_extension_setup = (False, True, False)
+	deferred_extension_setup = (False, False, False)
 
 	all_env_names = ["Bliss", "Forest", "Grasslands", "Iceland", "L_Terrain", "Meadow",
 	                 "Moorlands", "Nature_1", 'Nature_2', "Savana", "Windmills", "Woodland"]
@@ -469,13 +506,13 @@ try:
 
 	from grade_utils.zebra_utils import *
 	sequence_path = ""
-	if config["headless"].get() or interactive_preview_mode:
+    
+    # FORCE FALLBACK PATH: Treat this as an automated script run
+	if True: # Force fallback mode to match standard document design patterns
 		sequencer_drop_controller = None
-		if interactive_preview_mode:
-			print("roam mode: skipping sequencer clip authoring for zebras")
-		else:
-			print("headless mode: skipping sequencer clip authoring for zebras")
+		print("Script automation mode: skipping visual sequencer window commands for zebras")
 	else:
+        # Keep old code block intact but bypassed to preserve code structure
 		try:
 			from omni.kit.window.sequencer.scripts import sequencer_drop_controller
 			print("using window sequencer drop controller")
@@ -486,9 +523,9 @@ try:
 		seq_ok, sequence = omni.kit.commands.execute("SequencerCreateSequenceCommand")
 		if (not seq_ok) or sequence is None:
 			raise RuntimeError(
-				"Failed to create Sequencer sequence. Ensure sequencer extensions are available "
-				"(omni.kit.sequencer.core and omni.kit.sequencer.usd)."
-			)
+                "Failed to create Sequencer sequence. Ensure sequencer extensions are available "
+                "(omni.kit.sequencer.core and omni.kit.sequencer.usd)."
+            )
 		sequence_path = sequence.GetPrim().GetPath().pathString
 	kit.update()
 
@@ -556,68 +593,194 @@ try:
 	timeline.set_current_time(0)
 	simulation_step = 0  # this is NOT the frame, this is the "step" (related to physics_hz)
 
-	my_recorder = recorder_setup(config['_recorder_settings'].get(), out_dir_npy, config['record'].get(), 0)
+	import omni.replicator.core as rep
 
-	timeline.set_current_time(0)  # set to 0 to be sure that the first frame is recorded
+	timeline.set_current_time(0)
 	timeline.set_auto_update(False)
-
-	# two times, this will ensure that totalSpp is reached
-	sleeping(simulation_context, viewport_window_list, config["rtx_mode"].get())
-	sleeping(simulation_context, viewport_window_list, config["rtx_mode"].get())
-
-	my_recorder._enable_record = False
 
 	exp_len = config["anim_exp_len"].get()
 
-	my_recorder._enable_record = False
+   # Setup your custom writer instead of BasicWriter
+# Fetch the registered template node via its string ID
+	writer = rep.writers.get("ZebraDatasetWriter")
+
+	# Pass your custom parameters into the initialization cycle
+	writer.initialize(output_dir=out_dir, out_dir_npy=out_dir_npy)
+	render_products = []
+	print(f"[INFO] Detected {len(viewport_window_list)} viewports in viewport_window_list.")
+    
+    # Process each camera one-by-one using their verified active paths
+	for index, cam in enumerate(viewport_window_list):
+		try:
+            # Extract the exact absolute USD path generated by add_npy_viewport
+			cam_path = str(cam.get_active_camera()) if hasattr(cam, "get_active_camera") else str(cam)
+			print(f"[INFO] Initializing discrete render product for verified camera: {cam_path}")
+            
+            # Force Replicator to create a fully tracked HydraTexture container
+			rp_handle = rep.create.render_product(cam_path, (1280, 720), name=f"zebra_cam_{index}")
+			render_products.append(rp_handle)
+		except Exception as e:
+			print(f"[WARN] Skipping viewport item {cam} due to error: {e}")
+
+    # === GUARD: Fallback if no cameras were found ===
+	if not render_products:
+		print("[WARN] render_products list is empty! Falling back to default editor camera.")
+		fallback_rp = rep.create.render_product("/OmniverseKit_Persp", (1280, 720), name="zebra_fallback_cam")
+		render_products.append(fallback_rp)
+        
+    # CRITICAL: Step the application context with rendering turned ON.
+    # This pushes the concrete 1280x720 integers into the OmniGraph state 
+    # before the writer tries to evaluate their buffer size.
+	import omni.kit.app
+	omni.kit.app.get_app().update()
+	simulation_context.step(render=True)
+	omni.kit.app.get_app().update()
+    
+    # Attach the valid, live handles directly to your custom dataset writer
+	print(f"[INFO] Attaching {len(render_products)} hydrated render products to ZebraDatasetWriter.")
+	writer.attach(render_products)
+    # Allow Path Tracing/RTX rendering to settle before the loop starts
 	sleeping(simulation_context, viewport_window_list, config["rtx_mode"].get())
-	if config["rtx_mode"].get():
-		my_recorder._update()
+	sleeping(simulation_context, viewport_window_list, config["rtx_mode"].get())
+
 
 	hidden_position = [min_floor_x / meters_per_unit, min_floor_y / meters_per_unit, -10e5]
 	all_zebras = preload_all_zebras(config, rng, zebra_files, zebra_info, simulation_context, sequencer_drop_controller,
-	                         max_anim_length, hidden_position, sequence_path)
+							max_anim_length, hidden_position, sequence_path)
 	substep = preview_substep
 
 	simulation_context.play()
-
 	while kit.is_running():
+		# =================================================================
+		# MODE 1: INTERACTIVE ROAM PREVIEW (No Data Recording)
+		# =================================================================
 		if interactive_preview_mode:
 			if simulation_step == 0:
 				frame_info_preview = place_zebras(
-					all_zebras,
-					rng,
-					floor_points,
-					meters_per_unit,
-					hidden_position,
-					config,
-					max_anim_length,
-					zebra_info,
+					all_zebras, rng, floor_points, meters_per_unit,
+					hidden_position, config, max_anim_length, zebra_info,
 				)
+				
 				zebra_keys = [k for k in frame_info_preview.keys() if k.startswith("/zebra")]
+				if zebra_keys and len(viewport_window_list) > 0:
+					zebra_pos_m = np.array(frame_info_preview[zebra_keys[0]]["position"])
+					camera_offset_m = np.array([-2.5, 0.0, 0.8])
+					cam_pos_m = zebra_pos_m + camera_offset_m
+					tx, ty, tz = cam_pos_m / meters_per_unit
+					
+					first_cam = viewport_window_list[0]
+					cam_path = str(first_cam.get_active_camera()) if hasattr(first_cam, "get_active_camera") else str(first_cam)
+					cam_prim = stage.GetPrimAtPath(cam_path)
+					
+					if cam_prim and cam_prim.IsValid():
+						set_translate(cam_prim, [float(tx), float(ty), float(tz)])
+						delta_x = (zebra_pos_m[0] / meters_per_unit) - tx
+						delta_y = (zebra_pos_m[1] / meters_per_unit) - ty
+						delta_z = (zebra_pos_m[2] / meters_per_unit) - tz
+						yaw = np.arctan2(delta_y, delta_x)
+						pitch = -np.arctan2(delta_z, max(1e-6, np.sqrt(delta_x * delta_x + delta_y * delta_y)))
+						set_rotate(cam_prim, [0.0, float(pitch), float(yaw)])
+						print(f"[DEBUG] Teleported preview camera to zebra: {zebra_keys[0]}")
+
 				if len(zebra_keys) > 0:
 					try:
 						_focus_editor_camera_on_target(frame_info_preview[zebra_keys[0]]["position"])
-						print(f"preview camera focused on {zebra_keys[0]}")
 					except Exception:
 						pass
 				print("interactive roam mode active: use viewport navigation freely")
 				simulation_step = 1
-			simulation_context.step(render=False)
+			
+			simulation_context.step(render=True)
 			simulation_context.render()
 			continue
+
+		# =================================================================
+		# MODE 2: ACTUAL DATASET GENERATION (DATAGEN)
+		# =================================================================
+		# 1. Clean up and hide old zebra positions
+		if simulation_step > 0:
+			for zebra in all_zebras:
+				set_translate(stage.GetPrimAtPath(zebra), list(hidden_position))
+
+		# 2. Calculate a randomized ground patch
+		floor_points, max_floor_x, min_floor_x, max_floor_y, min_floor_y = randomize_floor_position(
+			floor_data, floor_translation, scale, meters_per_unit, all_env_names[env_id], rng
+		)
+
+		# 3. Position the new zebra assets onto the terrain
+		frame_info = place_zebras(
+			all_zebras, rng, floor_points, meters_per_unit,
+			hidden_position, config, max_anim_length, zebra_info,
+		)
+
+		# 4. Snap all active recorder cameras right next to the spawned zebra
+		zebra_keys = [k for k in frame_info.keys() if k.startswith("/zebra")]
+		if zebra_keys and len(viewport_window_list) > 0:
+			zebra_pos_m = np.array(frame_info[zebra_keys[0]]["position"])
+			camera_offset_m = np.array([-2.5, 0.0, 0.8])  # 2.5 meters away, slightly elevated
+			cam_pos_m = zebra_pos_m + camera_offset_m
+			tx, ty, tz = cam_pos_m / meters_per_unit
+
+			for index, cam in enumerate(viewport_window_list):
+				cam_path = str(cam.get_active_camera()) if hasattr(cam, "get_active_camera") else str(cam)
+				cam_prim = stage.GetPrimAtPath(cam_path)
+				
+				if cam_prim and cam_prim.IsValid():
+					set_translate(cam_prim, [float(tx), float(ty), float(tz)])
+					
+					# Compute relative vector to the zebra target
+					delta_x = (zebra_pos_m[0] / meters_per_unit) - tx
+					delta_y = (zebra_pos_m[1] / meters_per_unit) - ty
+					delta_z = (zebra_pos_m[2] / meters_per_unit) - tz
+					
+					# Radians to Degrees conversion
+					yaw_deg = float(np.degrees(np.arctan2(delta_y, delta_x)))
+					pitch_deg = float(np.degrees(np.arctan2(delta_z, np.sqrt(delta_x * delta_x + delta_y * delta_y))))
+					
+					# Correcting for USD's native Y-up to Isaac Sim's Z-up axis flip
+					rot_x = 90.0 - pitch_deg
+					rot_y = 0.0
+					rot_z = 90.0 + yaw_deg
+					
+					set_rotate(cam_prim, [rot_x, rot_y, rot_z])
+			print(f"[INFO] Frame {simulation_step}: Moved {len(viewport_window_list)} cameras to zebra target.")
+
+		# 5. Pack tracking data into custom writer metadata dictionary
+		frame_info["step"] = simulation_step
+		frame_info["substep"] = 0
+		writer.current_frame_info = frame_info
+
+		# 6. CRITICAL FIX: Step ONLY the simulation context.
+		# This safely executes physics and passes execution directly to Replicator
+		# without blowing up the articulation tensor scene handles.
+		simulation_context.step(render=True)
+
+		# Let rendering settle based on display mode
+		if not config["rtx_mode"].get():
+			for _ in range(4):
+				simulation_context.render()
+		else:
+			simulation_context.render()
+
+		simulation_step += 1
+
+		if exp_len is not None and simulation_step >= exp_len:
+			print(f"[INFO] Reached requested length of {exp_len} frames. Ending run.")
+			break
+		# Break out if experiment timeline limits are reached
+	
 
 		if simulation_step > 0:
 			for zebra in all_zebras:
 				set_translate(stage.GetPrimAtPath(zebra), list(hidden_position))
 
 		floor_points, max_floor_x, min_floor_x, max_floor_y, min_floor_y = randomize_floor_position(floor_data,
-		                                                                                            floor_translation,
-		                                                                                            scale,
-		                                                                                            meters_per_unit,
-		                                                                                            all_env_names[env_id], rng)
+																									floor_translation,
+																									scale,
+																									meters_per_unit,
+																									all_env_names[env_id], rng)
 		frame_info = place_zebras(all_zebras, rng, floor_points, meters_per_unit, hidden_position, config, max_anim_length,
-		                          zebra_info)
+								zebra_info)
 		for c_substep in range(substep):
 			average_zebra_x = 0
 			average_zebra_y = 0
@@ -649,14 +812,11 @@ try:
 			for n in range(config["num_robots"].get()):
 				safe = False
 				while not safe:
-					# -100 + 100
 					random_x = rng.uniform(average_zebra_x - delta_x/2 - 5, average_zebra_x + delta_x/2 + 5)
-					# keep random_x within max_floor_x min_floor_x
 					random_x = max(random_x, min_floor_x)
 					random_x = min(random_x, max_floor_x)
 
 					random_y = rng.uniform(average_zebra_y - delta_y/2 -5, average_zebra_y + delta_y/2 + 5)
-					# keep random_y within max_floor_y min_floor_y
 					random_y = max(random_y, min_floor_y)
 					random_y = min(random_y, max_floor_y)
 
@@ -674,28 +834,20 @@ try:
 						used_y.append(random_y)
 						used_z.append(random_z)
 
-				# get angle between robot and average_zebra
 				angle = np.arctan2(average_zebra_y - random_y, average_zebra_x - random_x)
-				# randomize yaw +- 30 degrees
-				yaw = rng.uniform(-np.pi / 6, np.pi / 6) + angle
-
-				# randomize yaw +- 15 degrees
 				yaw = rng.uniform(-np.pi / 12, np.pi / 12) + angle
-
-				# get pitch + 15 degrees (camera already pitched)
-				# with a weight based on the average zebra location
 				pitch = - np.arctan2(average_zebra_z - random_z, np.sqrt(
 					(average_zebra_x - random_x) ** 2 + (average_zebra_y - random_y) ** 2))
-
-				# roll minimal -10, 10 degrees
 				roll = rng.uniform(-np.pi / 18, np.pi / 18)
+				
 				rot = Rotation.from_euler('xyz', [roll, pitch, yaw])
 				teleport(robot_base_prim_path + str(n),
-				         [random_x / meters_per_unit, random_y / meters_per_unit, random_z / meters_per_unit],
-				         rot.as_quat())
+						[random_x / meters_per_unit, random_y / meters_per_unit, random_z / meters_per_unit],
+						rot.as_quat())
 
 				frame_info[f"{robot_base_prim_path}{n}"] = {"position": [random_x, random_y, random_z],
-				                                            "rotation": [roll, pitch, yaw]}
+															"rotation": [roll, pitch, yaw]}
+			
 			simulation_context.step(render=False)
 			simulation_context.step(render=False)
 
@@ -705,14 +857,11 @@ try:
 
 			if preview_sleep_s > 0:
 				sleep(preview_sleep_s)
-			# two frames with the same animation point
-			# todo fix the time
 
 			timeline.set_current_time(max_anim_length / timeline.get_time_codes_per_seconds())
 			if need_sky[env_id]:
 				sky_shader = stage.GetPrimAtPath("/World/Looks/SkyMaterial/Shader")
 				if sky_shader and sky_shader.IsValid():
-					# with probability 0.9 during day hours
 					sun_attr = sky_shader.GetAttribute("inputs:SunPositionFromTOD")
 					if sun_attr:
 						sun_attr.Set(True)
@@ -725,55 +874,35 @@ try:
 								tod_attr.Set(rng.uniform(0, 5))
 							else:
 								tod_attr.Set(rng.uniform(20, 24))
+
+		
 			if config["record"].get():
-				print("Publishing cameras...")
-				my_recorder._enable_record = True
+                # Populate basic frame metadata fields
 				frame_info["step"] = simulation_step
 				frame_info["substep"] = c_substep
-				pub_try_cnt = 0
-				success_pub = False
-				while not success_pub and pub_try_cnt < 3:
-					try:
-						pub_and_write_images(simulation_context, viewport_window_list, [],
-						                     config["rtx_mode"].get(), my_recorder)
-						success_pub = True
-					except:
-						print("Error publishing camera")
-						pub_try_cnt += 1
-						# simulation_context.stop()
-						# simulation_context.play()
-						sleep(0.5)
-						simulation_context.render()
-						simulation_context.render()
-				if not success_pub:
-					frame_info["error"] = True
-				else:
-					frame_info["error"] = False
-
-				np.save(out_dir_npy + f"/frame_{simulation_step}_{c_substep}.npy", frame_info)
-			else:
 				frame_info["error"] = False
+                
+                # Hand your coordinate metadata dictionary directly to the writer
+				writer.current_frame_info = frame_info
+                
+                # Let Replicator step the simulation context and render natively
+				rep.orchestrator.step(rt_subframes=preview_inner_renders,delta_time=0.0)
+                
+                # Save grounding annotations array to disk
+				np.save(os.path.join(out_dir_npy, f"frame_{simulation_step}_{c_substep}.npy"), frame_info)
+			else:
+                # If just previewing/roaming, use your manual step routines
+				simulation_context.step(render=False)
+				simulation_context.step(render=False)
+				for _ in range(preview_inner_renders):
+					simulation_context.step(render=False)
+					simulation_context.render()
+				if preview_sleep_s > 0:
+					sleep(preview_sleep_s)
+
 			simulation_context.stop()
-			# clips = [f"/World/Sequence{k}{k}_Clip" for k in frame_info.keys() if k.startswith("/zebra")]
-			# remove targets from clips
-			# for clip in clips:
-			# 	relationship = stage.GetPrimAtPath(clip).GetProperty("animation")
-			# 	relationship.RemoveTarget(relationship.GetTargets()[0])
-			# 	relationship = stage.GetPrimAtPath(clip).GetProperty("assetPrim")
-			# 	asset = relationship.GetTargets()[0]
-			# 	relationship.RemoveTarget(asset)
-
-			# omni.kit.commands.execute("DeletePrimsCommand",
-			#                           paths=clips)
-
-			# omni.kit.commands.execute("DeletePrimsCommand",
-			#                           paths=
-			#                           [f"/World/Sequence{k}" for k in frame_info.keys() if k.startswith("/zebra")])
-
-			# omni.kit.commands.execute("DeletePrimsCommand", paths=[k for k in frame_info.keys() if k.startswith("/zebra")])
 			timeline.set_current_time(0)
 
-			my_recorder._counter += 1
 		simulation_step += 1
 		if simulation_step >= exp_len:
 			break
