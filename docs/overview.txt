@@ -1,0 +1,26 @@
+Overview
+
+Isaac Sim Replicator offers various tools and workflows for synthetic data generation (SDG) using the omni.replicator extension. This page provides an overview of the tools and extensions available in Isaac Sim for synthetic data generation, including semantic labeling, sensor visualization, GUI-based data recording, config file-based SDG workflows, and getting started scripts.
+The Semantics Schema Editor
+
+The Semantics Schema Editor is a GUI-based extension that enables you to view, add, edit, or remove semantic labels on prims in a stage. Semantically labeling prims is necessary for annotators like semantic segmentation or bounding boxes to include semantic information in the synthetic data. You can access the editor via Tools > Replicator > Semantics Schema Editor, or find it by default as a tab in the Properties panel. To programmatically label prims in a stage, see the following example snippet.
+Semantics Schema Editor
+The Synthetic Data Visualizer
+
+The Synthetic Data Visualizer tool enables sensor output visualization directly in the Viewport window, it can be accessed using the visualizer icon and selecting the desired output formats.
+Synthetic Data Visualizer
+
+Note
+
+    Cross Correspondence visualization requires a specific two-camera setup explained in the Cross Correspondence section of the annotator details page.
+
+The Synthetic Data Recorder
+
+The Synthetic Data Recorder is a GUI-based tool that allows users to record synthetic data directly from the editor. It is built on top of omni.replicator using BasicWriter as its default writer, it is useful for quick iterations of synthetic data recordings for testing purposes.
+Synthetic Data Recorder
+Replicator YAML
+
+Replicator YAML is a configuration file-based workflow built on top of the Replicator API. It allows users to define randomizations and data capture pipelines as configuration files. These configurations are transformed through the Replicator API into an OmniGraph workflow for synthetic data generation.
+Getting Started Scripts
+
+The Getting Started Scripts provide a starting point for typical Isaac Sim Replicator workflows. These tutorials cover basic topics such as accessing data from annotators or writers, and using Replicator randomizers together with custom USD/Isaac Sim API randomizers triggered independently from the data capture.

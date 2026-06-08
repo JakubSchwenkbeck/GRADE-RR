@@ -663,24 +663,29 @@ try:
 				
 				zebra_keys = [k for k in frame_info_preview.keys() if k.startswith("/zebra")]
 				if zebra_keys and len(viewport_window_list) > 0:
-					zebra_pos_m = np.array(frame_info_preview[zebra_keys[0]]["position"])
-					camera_offset_m = np.array([-2.5, 0.0, 0.8])
-					cam_pos_m = zebra_pos_m + camera_offset_m
-					tx, ty, tz = cam_pos_m / meters_per_unit
+					from isaacsim.core.utils.viewports import set_camera_view
+					from isaacsim.core.utils.xforms import get_world_pose
+					
+					target_zebra_path = zebra_keys[0]
+					
+					# Fetch live translation via correct modern API
+					zebra_live_pos, _ = get_world_pose(target_zebra_path)
+					zebra_live_pos_units = np.array(zebra_live_pos)
+					
+					torso_elevation_units = 0.75 / meters_per_unit
+					target_units = zebra_live_pos_units + np.array([0.0, 0.0, torso_elevation_units])
+					
+					# Preview camera side view offset
+					offset_units = np.array([0.0, 6.0, 0.8]) / meters_per_unit
+					eye_units = target_units + offset_units
 					
 					first_cam = viewport_window_list[0]
 					cam_path = str(first_cam.get_active_camera()) if hasattr(first_cam, "get_active_camera") else str(first_cam)
-					cam_prim = stage.GetPrimAtPath(cam_path)
 					
-					if cam_prim and cam_prim.IsValid():
-						set_translate(cam_prim, [float(tx), float(ty), float(tz)])
-						delta_x = (zebra_pos_m[0] / meters_per_unit) - tx
-						delta_y = (zebra_pos_m[1] / meters_per_unit) - ty
-						delta_z = (zebra_pos_m[2] / meters_per_unit) - tz
-						yaw = np.arctan2(delta_y, delta_x)
-						pitch = -np.arctan2(delta_z, max(1e-6, np.sqrt(delta_x * delta_x + delta_y * delta_y)))
-						set_rotate(cam_prim, [0.0, float(pitch), float(yaw)])
-						print(f"[DEBUG] Teleported preview camera to zebra: {zebra_keys[0]}")
+					try:
+						set_camera_view(eye=eye_units, target=target_units, camera_prim_path=cam_path)
+					except Exception as e:
+						print(f"[WARNING] Preview camera adjust failed: {e}")
 
 				if len(zebra_keys) > 0:
 					try:
@@ -713,49 +718,59 @@ try:
 			hidden_position, config, max_anim_length, zebra_info,
 		)
 
-		# 4. Snap all active recorder cameras right next to the spawned zebra
+		# 4. Rig all active recorder cameras to the live USD location
 		zebra_keys = [k for k in frame_info.keys() if k.startswith("/zebra")]
-		if zebra_keys and len(viewport_window_list) > 0:
-			zebra_pos_m = np.array(frame_info[zebra_keys[0]]["position"])
-			camera_offset_m = np.array([-2.5, 0.0, 0.8])  # 2.5 meters away, slightly elevated
-			cam_pos_m = zebra_pos_m + camera_offset_m
-			tx, ty, tz = cam_pos_m / meters_per_unit
+		num_cameras = len(viewport_window_list)
+		
+		if zebra_keys and num_cameras > 0:
+			from isaacsim.core.utils.viewports import set_camera_view
+			from isaacsim.core.utils.xforms import get_world_pose
+			
+			# Target the first active spawned zebra prim path string
+			target_zebra_path = zebra_keys[0]
+			
+			# FIX: Pull true real-time location using modern xforms framework (returns position, orientation tuple)
+			zebra_live_pos, _ = get_world_pose(target_zebra_path)
+			zebra_live_pos_units = np.array(zebra_live_pos)
+			
+			# Elevate the look-at target vector up into the zebra's mid-body center
+			torso_elevation_units = 0.75 / meters_per_unit
+			target_units = zebra_live_pos_units + np.array([0.0, 0.0, torso_elevation_units])
 
 			for index, cam in enumerate(viewport_window_list):
 				cam_path = str(cam.get_active_camera()) if hasattr(cam, "get_active_camera") else str(cam)
-				cam_prim = stage.GetPrimAtPath(cam_path)
 				
-				if cam_prim and cam_prim.IsValid():
-					set_translate(cam_prim, [float(tx), float(ty), float(tz)])
-					
-					# Compute relative vector to the zebra target
-					delta_x = (zebra_pos_m[0] / meters_per_unit) - tx
-					delta_y = (zebra_pos_m[1] / meters_per_unit) - ty
-					delta_z = (zebra_pos_m[2] / meters_per_unit) - tz
-					
-					# Radians to Degrees conversion
-					yaw_deg = float(np.degrees(np.arctan2(delta_y, delta_x)))
-					pitch_deg = float(np.degrees(np.arctan2(delta_z, np.sqrt(delta_x * delta_x + delta_y * delta_y))))
-					
-					# Correcting for USD's native Y-up to Isaac Sim's Z-up axis flip
-					rot_x = 90.0 - pitch_deg
-					rot_y = 0.0
-					rot_z = 90.0 + yaw_deg
-					
-					set_rotate(cam_prim, [rot_x, rot_y, rot_z])
-			print(f"[INFO] Frame {simulation_step}: Moved {len(viewport_window_list)} cameras to zebra target.")
+				# Locked side profile angle geometry using a Y-axis offset vector
+				# Stagger multiple cameras side-by-side along the X axis so they do not overlap
+				stagger_x_m = (index - (num_cameras - 1) / 2) * 0.6  # Spaced 60cm apart along the flank
+				radius_y_m = 6.0                                    # Backed away 6 meters from the side
+				elevation_z_m = 0.8                                 # Up 80cm looking slightly downward
+				
+				# Convert relative meters to stage scale units
+				offset_units = np.array([stagger_x_m, radius_y_m, elevation_z_m]) / meters_per_unit
+				eye_units = target_units + offset_units
+				
+				try:
+					# Locks the viewport positioning and look-at orientation entirely onto the torso
+					set_camera_view(
+						eye=eye_units,
+						target=target_units,
+						camera_prim_path=cam_path
+					)
+				except Exception as e:
+					print(f"[WARNING] Failed setting view for {cam_path}: {e}")
+			
+			print(f"[INFO] Frame {simulation_step}: Cameras locked onto side profile at live position.")
 
 		# 5. Pack tracking data into custom writer metadata dictionary
 		frame_info["step"] = simulation_step
 		frame_info["substep"] = 0
 		writer.current_frame_info = frame_info
 
-		# 6. CRITICAL FIX: Step ONLY the simulation context.
-		# This safely executes physics and passes execution directly to Replicator
-		# without blowing up the articulation tensor scene handles.
+		# 6. Cycle simulation framework
 		simulation_context.step(render=True)
 
-		# Let rendering settle based on display mode
+		# Clear out path tracing back-buffers if relevant
 		if not config["rtx_mode"].get():
 			for _ in range(4):
 				simulation_context.render()
@@ -767,9 +782,6 @@ try:
 		if exp_len is not None and simulation_step >= exp_len:
 			print(f"[INFO] Reached requested length of {exp_len} frames. Ending run.")
 			break
-		# Break out if experiment timeline limits are reached
-	
-
 		if simulation_step > 0:
 			for zebra in all_zebras:
 				set_translate(stage.GetPrimAtPath(zebra), list(hidden_position))
