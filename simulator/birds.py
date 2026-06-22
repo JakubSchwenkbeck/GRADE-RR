@@ -5,6 +5,8 @@ import numpy as np
 import os
 import sys
 
+from replicator import ReplicatorPipeline
+
 # Ensure 'simulator' directory is in sys.path for robust imports
 simulator_dir = os.path.dirname(os.path.abspath(__file__))
 if simulator_dir not in sys.path:
@@ -301,8 +303,7 @@ try:
 	parser.add_argument("--debug_vis", type=boolean_string, default=False,
 						help="When true continuosly loop the rendering")
 	parser.add_argument("--neverending", type=boolean_string, default=False, help="Never stop the main loop")
-	parser.add_argument("--mode", type=str, default="roam", choices=["roam"],
-						help="roam keeps the scene interactive and lightweight; this script is roam-only")
+	parser.add_argument("--mode", type=str, default="roam", choices=["roam", "datagen"], help="Execution mode")
 	parser.add_argument("--fix_env", type=str, default="",
 						help="leave it empty to have a random env, fix it to use a fixed one. Useful for loop processing")
 
@@ -486,8 +487,8 @@ try:
 
 	# do this AFTER loading the world
 	simulation_context = SimulationContext(physics_dt=1.0 / config["physics_hz"].get(),
-	                                       rendering_dt=1.0 / config["render_hz"].get(),
-	                                       stage_units_in_meters=0.01)
+											rendering_dt=1.0 / config["render_hz"].get(),
+											stage_units_in_meters=0.01)
 	simulation_context.initialize_physics()
 
 	simulation_context.play()
@@ -499,12 +500,13 @@ try:
 	kit.update()
 	meters_per_unit = 0.01
 
-	# use basic rendering (disable RTX/raytracing for visibility)
+	# Configure rendering defaults based on operating mode
 	settings = carb.settings.get_settings()
-	settings.set("/rtx/pathtracing/spp", 1)
-	settings.set("/rtx/directLighting/samplesPerPixel", 1)
-	settings.set("/rtx/raytracing/enabled", False)
-	
+	if interactive_preview_mode:
+		settings.set("/rtx/pathtracing/spp", 1)
+		settings.set("/rtx/directLighting/samplesPerPixel", 1)
+		settings.set("/rtx/raytracing/enabled", False)
+
 	env_prim_path = environment.load_and_center(config["env_prim_path"].get())
 	process_semantics(config["env_prim_path"].get(), "World")
 
@@ -519,14 +521,13 @@ try:
 	floor_translation = np.array(stage.GetPrimAtPath(f"/World/home/{ground_area_name[env_id]}").GetProperty(
 		'xformOp:translate').Get())
 	scale = np.array(stage.GetPrimAtPath(f"/World/home/{ground_area_name[env_id]}").GetProperty("xformOp:scale").Get())
-	# i need to consider that z has a bounding box and that the position is on the top corner
 
 	for _ in range(preview_stage_renders):
 		simulation_context.render()
 
 	floor_points, max_floor_x, min_floor_x, max_floor_y, min_floor_y = randomize_floor_position(floor_data,
-	                                                                                            floor_translation, scale,
-	                                                                                            meters_per_unit, all_env_names[env_id], rng)
+																								floor_translation, scale,
+																								meters_per_unit, all_env_names[env_id], rng)
 
 	add_semantics(stage.GetPrimAtPath("/World/home"), "world")
 
@@ -539,23 +540,22 @@ try:
 		if not os.path.exists(bird_asset["path"]):
 			raise FileNotFoundError(f"Missing bird asset: {bird_asset['path']}")
 
-	print("Loading birds for roam mode..")
+	print(f"Loading birds for {args.mode} mode..")
 	bird_prim_paths = []
 	for index, bird_asset in enumerate(bird_assets):
 		bird_path = load_asset("/bird_", index, bird_asset["path"])
 		bird_prim_paths.append(bird_path)
 		add_semantics(stage.GetPrimAtPath(bird_path), "bird")
-		set_scale(stage.GetPrimAtPath(bird_path), 0.05)  # Much smaller scale
+		set_scale(stage.GetPrimAtPath(bird_path), 0.05)
 		kit.update()
 
-	# Use basic rendering for visibility (not RTX)
-	settings = carb.settings.get_settings()
-	settings.set("/rtx/raytracing/enabled", False)
-	settings.set("/rtx/pathtracing/enabled", False)
+	if interactive_preview_mode:
+		settings.set("/rtx/raytracing/enabled", False)
+		settings.set("/rtx/pathtracing/enabled", False)
 
 	for _ in range(5):
 		simulation_context.step(render=False)
-		sleeping(simulation_context, [], False)  # Disable RTX during sleep
+		sleeping(simulation_context, [], False)
 
 	flat_floor_points = floor_points.reshape(-1, 3)
 	chosen_positions = []
@@ -576,14 +576,11 @@ try:
 	bird_motion_state = []
 	for bird_path, bird_position in zip(bird_prim_paths, chosen_positions):
 		yaw = rng.uniform(-np.pi, np.pi)
-		# Compute the actual mesh offset from root prim
 		mesh_offset = find_mesh_offset_from_root(bird_path, stage)
 		print(f"[DEBUG] Bird {bird_path}: computed mesh offset = {mesh_offset}")
 		
-		# Cancel out the mesh offset by applying inverse offset to mesh prims
 		cancel_mesh_offset(bird_path, stage, mesh_offset)
 		
-		# Apply initial position (without mesh offset since we cancelled it)
 		compensated_position = bird_position / meters_per_unit
 		set_translate(stage.GetPrimAtPath(bird_path), list(compensated_position))
 		set_rotate(stage.GetPrimAtPath(bird_path), [0.0, 0.0, float(yaw)])
@@ -608,8 +605,12 @@ try:
 			_focus_editor_camera_on_target(chosen_positions[0])
 		except Exception:
 			pass
+	# Initialize the modular Replicator pipeline
+	rep_pipeline = ReplicatorPipeline(config, out_dir)
+	if not interactive_preview_mode:
+		rep_pipeline.setup_data_writer()
 
-	print("Birds loaded; roam mode is active.")
+	print(f"Birds loaded; entering main execution loop in [{args.mode.upper()}] mode.")
 	simulation_context.play()
 	try:
 		import omni.timeline
@@ -617,27 +618,35 @@ try:
 		timeline.play()
 	except Exception:
 		timeline = None
+
+	simulation_step = 0
 	roam_start = time.time()
+	exp_len = config.get("experiment_length", None) or 100
+
 	while kit.is_running():
-		elapsed = time.time() - roam_start
+		# Handle time mapping dynamically based on runtime mode
+		if interactive_preview_mode:
+			elapsed = time.time() - roam_start
+		else:
+			elapsed = simulation_step * (1.0 / config["render_hz"].get())
+
 		if timeline is not None:
-			# Drive USD skel animations if present in bird assets.
 			timeline.set_current_time(elapsed)
-		for motion in bird_motion_state:
+
+		target_bird_pos_m = None
+		for index, motion in enumerate(bird_motion_state):
 			t = elapsed + motion["phase"]
 			new_position, tangent, progress = _sample_closed_polyline(motion["waypoints"], motion["speed"], t)
 
-			# Mission phases: takeoff -> cruise -> glide -> landing.
 			if progress < 0.22:
-				flap_amp, flap_freq = 0.55, 8.0   # takeoff
+				flap_amp, flap_freq = 0.55, 8.0   
 			elif progress < 0.62:
-				flap_amp, flap_freq = 0.30, 5.5   # cruise
+				flap_amp, flap_freq = 0.30, 5.5   
 			elif progress < 0.84:
-				flap_amp, flap_freq = 0.10, 2.0   # glide
+				flap_amp, flap_freq = 0.10, 2.0   
 			else:
-				flap_amp, flap_freq = 0.45, 7.0   # landing
+				flap_amp, flap_freq = 0.45, 7.0   
 
-			# If embedded animation exists, keep procedural flap subtle.
 			if motion.get("has_animation", False):
 				flap_amp *= 0.55
 
@@ -648,12 +657,37 @@ try:
 			pitch = -np.arctan2(tangent[2], horizontal_speed)
 			roll = np.sin(t * max(2.0, flap_freq * 0.6)) * (0.06 + 0.10 * flap_amp)
 			
-			# No offset needed since mesh is now aligned with root prim
 			compensated = new_position / meters_per_unit
 			set_translate(stage.GetPrimAtPath(motion["path"]), list(compensated))
 			set_rotate(stage.GetPrimAtPath(motion["path"]), [float(roll), float(pitch), float(yaw)])
-		simulation_context.step(render=False)
-		simulation_context.render()
+
+			if index == 0:
+				target_bird_pos_m = new_position
+
+		# =================================================================
+		# BRANCH A: INTERACTIVE PREVIEW MODE
+		# =================================================================
+		if interactive_preview_mode:
+			simulation_context.step(render=False)
+			simulation_context.render()
+			continue
+
+		# =================================================================
+		# BRANCH B: DATASET GENERATION MODE (DATAGEN)
+		# =================================================================
+		rep_pipeline.update_tracking_cameras(target_bird_pos_m)
+		rep_pipeline.assign_metadata(simulation_step, target_bird_pos_m)
+
+		# Triggers internal subframe loops, clearing out raytracing darkness 
+		simulation_context.step(render=True)
+		simulation_step += 1
+
+		if simulation_step % 10 == 0:
+			print(f"[INFO] Sequenced and generated frame {simulation_step}/{exp_len}")
+
+		if exp_len is not None and simulation_step >= exp_len:
+			print(f"[INFO] Requested frame constraint reached ({exp_len}). Terminating.")
+			break
 except:
 	traceback.print_exc()
 	raise
